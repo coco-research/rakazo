@@ -1,6 +1,7 @@
-import { lazy, Suspense, useLayoutEffect } from "react";
+import { lazy, Suspense, useEffect, useLayoutEffect, useState } from "react";
 import { Navigate, Route, Routes } from "react-router-dom";
 import { authClient } from "./lib/auth";
+import { ensureLocalSession } from "./lib/auto-login";
 import { markAfterPaint, markOnce } from "./lib/performance";
 import { ShellPage } from "./pages/Shell";
 
@@ -16,30 +17,61 @@ const WelcomePage = lazy(() =>
 
 export function App() {
   const session = authClient.useSession();
+  const user = session.data?.user;
+  // Single-machine, single-user deployment: never show a sign-in/sign-up
+  // screen. Silently provision (or reuse) one local account instead.
+  const [autoLogin, setAutoLogin] = useState<"pending" | "done" | "failed">("pending");
+  useEffect(() => {
+    if (session.isPending || user || autoLogin !== "pending") return;
+    let cancelled = false;
+    void ensureLocalSession().then((ok) => {
+      if (!cancelled) setAutoLogin(ok ? "done" : "failed");
+    });
+    return () => {
+      cancelled = true;
+    };
+  }, [session.isPending, user, autoLogin]);
+
   useLayoutEffect(() => {
     if (session.isPending) return;
     markOnce("rk:renderer:session-committed");
     markAfterPaint("rk:renderer:session-painted");
   }, [session.isPending]);
-  if (session.isPending) {
+
+  if (session.isPending || (!user && autoLogin === "pending")) {
     return window.location.pathname.startsWith("/app") ? (
       <ShellSkeleton />
     ) : (
       <div className="grid h-full place-items-center text-[#6C6C70]">Loading…</div>
     );
   }
-  const user = session.data?.user;
+  // Only reachable if local auto-provisioning genuinely failed (e.g. the API
+  // is unreachable), so this is a fallback path rather than the normal flow.
+  const showAuthScreens = !user && autoLogin === "failed";
   return (
     <Suspense fallback={<div className="h-full bg-[#050506]" />}>
       <Routes>
-        <Route path="/" element={user ? <Navigate to="/app" replace /> : <WelcomePage />} />
+        <Route
+          path="/"
+          element={
+            user ? <Navigate to="/app" replace /> : showAuthScreens ? <WelcomePage /> : null
+          }
+        />
         <Route
           path="/sign-in"
-          element={user ? <Navigate to="/app" replace /> : <AuthPage mode="in" />}
+          element={
+            user ? <Navigate to="/app" replace /> : showAuthScreens ? <AuthPage mode="in" /> : null
+          }
         />
         <Route
           path="/sign-up"
-          element={user ? <Navigate to="/onboarding" replace /> : <AuthPage mode="up" />}
+          element={
+            user ? (
+              <Navigate to="/onboarding" replace />
+            ) : showAuthScreens ? (
+              <AuthPage mode="up" />
+            ) : null
+          }
         />
         <Route
           path="/onboarding"

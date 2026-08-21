@@ -123,6 +123,9 @@ export default defineConfig(({ mode }) => {
   });
   const performanceAssetDelayMs = Number(process.env.RAKAZO_PERFORMANCE_ASSET_DELAY_MS ?? 0);
   return {
+    // Root .env (not apps/web/.env) is this monorepo's single source of config;
+    // expose its VITE_* vars to the client bundle too (e.g. local auto-login).
+    envDir: path.resolve(import.meta.dirname, "../.."),
     plugins: [
       react(),
       tailwindcss(),

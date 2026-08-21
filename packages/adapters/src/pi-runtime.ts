@@ -11,9 +11,11 @@ import type {
 } from "@rakazo/adapter-kit";
 import { builtinAgentTools, DELEGATION_TOOL_NAMES } from "./builtin-tools.js";
 import { PiRuntimeCredentialStore, toOAuthCredential } from "./pi-credentials.js";
+import { registerLocalProviders } from "./pi-local-providers.js";
 
 const running = new Map<string, AbortController>();
 const catalogModels = builtinModels();
+registerLocalProviders(catalogModels);
 const MAX_PARALLEL_SUBAGENTS = 4;
 // Pi forwards these names to OpenAI Responses, whose function-name contract is
 // ^[a-zA-Z0-9_-]+$ with a maximum length of 64 characters.

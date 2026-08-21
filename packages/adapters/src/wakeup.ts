@@ -6,12 +6,49 @@ import {
   type JobWorkerHost,
 } from "@rakazo/adapter-kit";
 import { makeWorkerUtils, type Runner, run, type WorkerUtils } from "graphile-worker";
+import { Pool } from "pg";
+
+/**
+ * keepAlive guards the publisher's pg.Pool (used for one-off addJob/cancel
+ * calls, so it sits idle between calls) against long-idle connections being
+ * silently dropped, e.g. if this ever runs behind a tunneled Postgres
+ * connection (Colima's SSH-based Docker port-forward on local dev). Not the
+ * fix for a stalled run.continue worker specifically — that turned out to be
+ * orphaned esbuild/tsx-watch child processes left behind by killing the app
+ * with `pkill -f <app-dir>` (which doesn't match esbuild's process name)
+ * combined with host-level memory/swap pressure, not a dead DB connection.
+ * `pkill -9 -f esbuild` alongside the app pattern, or a clean full-stack
+ * restart, clears it.
+ */
+function createKeepAlivePool(connectionString: string): Pool {
+  const pool = new Pool({
+    connectionString,
+    keepAlive: true,
+    keepAliveInitialDelayMillis: 10_000,
+  });
+  // Required when passing our own pgPool to graphile-worker: an idle client
+  // erroring (e.g. the exact dead-connection case this pool exists to avoid)
+  // emits 'error' on the pool, and an EventEmitter with no 'error' listener
+  // makes Node throw and crash the process. The pool itself recovers by
+  // dropping the bad client, so logging here is just visibility, not a retry.
+  pool.on("error", (error) => {
+    console.error("[wakeup] pg pool error (recovering):", error);
+  });
+  // graphile-worker warns (and otherwise installs its own handler) if a
+  // pgPool we supply has no 'connect' listener either; a no-op satisfies it
+  // since we don't need any per-connection setup here.
+  pool.on("connect", () => {});
+  return pool;
+}
 
 export class GraphileJobPublisher implements JobPublisher {
   private utils: Promise<WorkerUtils> | undefined;
   private closed = false;
+  private readonly pool: Pool;
 
-  constructor(private readonly connectionString: string) {}
+  constructor(connectionString: string) {
+    this.pool = createKeepAlivePool(connectionString);
+  }
 
   async enqueue(job: BackgroundJob): Promise<void> {
     const utils = await this.getUtils();
@@ -32,11 +69,12 @@ export class GraphileJobPublisher implements JobPublisher {
     if (this.closed) return;
     this.closed = true;
     if (this.utils) await (await this.utils).release();
+    await this.pool.end().catch(() => undefined);
   }
 
   private getUtils(): Promise<WorkerUtils> {
     if (this.closed) throw new Error("Background job publisher is closed");
-    this.utils ??= makeWorkerUtils({ connectionString: this.connectionString });
+    this.utils ??= makeWorkerUtils({ pgPool: this.pool });
     return this.utils;
   }
 }
